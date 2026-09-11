@@ -23,7 +23,7 @@ OLLAMA_URL = os.getenv(
 
 OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL",
-    "llama3.1:8b",
+    "qwen2.5:7b",
 )
 
 MAX_AGENT_TURNS = 6
@@ -329,20 +329,24 @@ async def _call_ollama(
     """Ask Ollama for the next agent action."""
 
     payload = {
-        "model": OLLAMA_MODEL,
-        "keep_alive": "10m",
-        "messages": [
-            {
-                "role": "system",
-                "content": _build_system_message(
-                    tools
-                ),
-            },
-            *messages,
-        ],
-        "stream": False,
-        "format": "json",
-    }
+    "model": OLLAMA_MODEL,
+    "keep_alive": "10m",
+    "messages": [
+        {
+            "role": "system",
+            "content": _build_system_message(
+                tools
+            ),
+        },
+        *messages,
+    ],
+    "stream": False,
+    "format": "json",
+    "options": {
+        "temperature": 0,
+        "num_predict": 512,
+    },
+}
 
     try:
         async with httpx.AsyncClient(

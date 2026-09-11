@@ -74,7 +74,6 @@ def preparation_timeline(
         topics=topics,
     )
 
-
 @mcp.tool()
 def roadmap_structure(
     goal: str,
@@ -94,7 +93,6 @@ def roadmap_structure(
         target_months=target_months,
         hours_per_day=hours_per_day,
     )
-
 
 if __name__ == "__main__":
     mcp.run()

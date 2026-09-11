@@ -1,8 +1,6 @@
 import httpx
 
-
 OPEN_LIBRARY_API = "https://openlibrary.org/search.json"
-
 
 def search_books(topic: str, limit: int = 5) -> str:
     """
