@@ -1,14 +1,11 @@
 import httpx
 
-
 STACK_EXCHANGE_API = "https://api.stackexchange.com/2.3"
 GITHUB_API = "https://api.github.com"
-
 
 def _normalize_topic(topic: str) -> str:
     """Normalize a user topic for API searches."""
     return topic.strip().lower()
-
 
 def _normalize_stackoverflow_tag(topic: str) -> str:
     """
@@ -20,7 +17,6 @@ def _normalize_stackoverflow_tag(topic: str) -> str:
         .replace(" ", "-")
         .replace("_", "-")
     )
-
 
 def _search_github(
     client: httpx.Client,
@@ -47,7 +43,6 @@ def _search_github(
 
     return response.json().get("items", [])
 
-
 def _search_stackoverflow(
     client: httpx.Client,
     topic: str,
@@ -72,7 +67,6 @@ def _search_stackoverflow(
     response.raise_for_status()
 
     return response.json().get("items", [])
-
 
 def get_current_technology(
     topic: str,
