@@ -344,7 +344,7 @@ async def _call_ollama(
     "format": "json",
     "options": {
         "temperature": 0,
-        "num_predict": 512,
+        "num_predict": 700,
     },
 }
 
@@ -647,32 +647,44 @@ def _normalize_decision(
     available_tools: set[str],
 ) -> dict[str, Any]:
     """
-    Normalize slightly different JSON formats produced by local models.
+    Normalize tool decisions produced by the local LLM.
 
-    Supported formats:
+    The model should return:
 
-    Standard:
     {
         "action": "tool",
-        "tool_name": "roadmap_structure",
+        "tool_name": "preparation_timeline",
         "arguments": {...}
     }
 
-    Also accepted:
+    But smaller local models sometimes return:
+
     {
-        "action": "roadmap_structure",
+        "action": "preparation_timeline",
+        "arguments": {...}
+    }
+
+    or use a synonymous action name such as:
+
+    {
+        "action": "start_study_plan",
         "arguments": {...}
     }
     """
 
     action = decision.get("action")
 
-    # Standard tool format.
+    # ---------------------------------------------------------
+    # Correct tool format
+    # ---------------------------------------------------------
+
     if action == "tool":
         return decision
 
-    # Some local models put the tool name directly
-    # in the action field.
+    # ---------------------------------------------------------
+    # Direct MCP tool name in action
+    # ---------------------------------------------------------
+
     if (
         isinstance(action, str)
         and action in available_tools
@@ -686,7 +698,202 @@ def _normalize_decision(
             ),
         }
 
+    # ---------------------------------------------------------
+    # Common aliases produced by smaller local models
+    # ---------------------------------------------------------
+
+    aliases = {
+        "start_study_plan": "preparation_timeline",
+        "study_plan": "preparation_timeline",
+        "create_study_plan": "preparation_timeline",
+        "build_study_plan": "preparation_timeline",
+
+        "research_technology": "technology_research",
+        "current_technology": "technology_research",
+        "technology_search": "technology_research",
+
+        "find_books": "book_recommendations",
+        "book_search": "book_recommendations",
+        "recommend_books": "book_recommendations",
+
+        "find_projects": "project_recommendations",
+        "recommend_projects": "project_recommendations",
+        "project_search": "project_recommendations",
+
+        "build_roadmap": "roadmap_structure",
+        "create_roadmap": "roadmap_structure",
+        "plan_roadmap": "roadmap_structure",
+    }
+
+    if (
+        isinstance(action, str)
+        and action in aliases
+    ):
+        normalized_tool = aliases[action]
+
+        if normalized_tool in available_tools:
+            return {
+                "action": "tool",
+                "tool_name": normalized_tool,
+                "arguments": decision.get(
+                    "arguments",
+                    {},
+                ),
+            }
+
+    # ---------------------------------------------------------
+    # Leave unknown actions unchanged so the caller can
+    # report a useful error.
+    # ---------------------------------------------------------
+
     return decision
+def _trim_tool_result(
+    result: str,
+    max_chars: int = 5000,
+) -> str:
+    """
+    Limit the amount of tool output sent to the local LLM.
+
+    Large API responses can make later reasoning steps extremely
+    slow on CPU-only local models.
+    """
+
+    if len(result) <= max_chars:
+        return result
+
+    return (
+        result[:max_chars]
+        + "\n\n[Tool result truncated for the local LLM.]"
+    )
+
+async def _generate_final_answer(
+    user_request: str,
+    tool_results: list[dict[str, str]],
+) -> str:
+    """
+    Generate the final roadmap using a compact context.
+
+    This avoids sending the full agent history and MCP schemas
+    to the local 7B model for the final response.
+    """
+
+    sections: list[str] = []
+
+    for item in tool_results:
+        sections.append(
+            f"""
+TOOL: {item["tool"]}
+
+RESULT:
+{item["result"]}
+""".strip()
+        )
+
+    combined_results = "\n\n".join(
+        sections
+    )
+
+    prompt = f"""
+You are the final answer writer for Road Map Planner.
+
+USER REQUEST:
+{user_request}
+
+You have already collected information from MCP tools.
+
+TOOL RESULTS:
+{combined_results}
+
+Create the final roadmap.
+
+The roadmap should include:
+
+1. Goal
+2. Starting Point / Assumptions
+3. Skill Gaps
+4. Roadmap Phases
+5. Current Technologies
+6. Books / Resources
+7. Real-World Projects
+8. Preparation Timeline
+9. Expected Outcome
+
+Important:
+
+- Use the tool results as factual context.
+- Do not invent information that contradicts the tool results.
+- Make the plan practical and actionable.
+- Respect the user's available time.
+- Do not mention MCP, internal tools, or agent reasoning.
+- Do not output JSON.
+- Return only the final human-readable roadmap.
+"""
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "keep_alive": "10m",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a professional roadmap writer. "
+                    "Write a concise but complete roadmap."
+                ),
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
+        "stream": False,
+        "options": {
+            "temperature": 0.2,
+            "num_predict": 700,
+        },
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                connect=10.0,
+                read=300.0,
+                write=30.0,
+                pool=30.0,
+            )
+        ) as client:
+
+            response = await client.post(
+                OLLAMA_URL,
+                json=payload,
+            )
+
+            response.raise_for_status()
+
+    except httpx.ReadTimeout as exc:
+        raise RuntimeError(
+            "The final roadmap generation timed out. "
+            "The local model is running on CPU."
+        ) from exc
+
+    except httpx.RequestError as exc:
+        raise RuntimeError(
+            f"Final roadmap generation failed: {exc}"
+        ) from exc
+
+    data = response.json()
+
+    answer = (
+        data
+        .get("message", {})
+        .get("content", "")
+    )
+
+    if not answer:
+        raise RuntimeError(
+            "Ollama returned an empty final roadmap."
+        )
+
+    return answer.strip()
 # ============================================================
 # Main agent
 # ============================================================
@@ -775,7 +982,9 @@ async def run_agent(
                 tool_history: list[
                     dict[str, Any]
                 ] = []
-
+                tool_results: list[
+                dict[str, str]
+                    ] = []
                 for turn in range(
                     1,
                     MAX_AGENT_TURNS + 1,
@@ -791,13 +1000,14 @@ async def run_agent(
                     )
 
                     if tool_history:
+                        recent_tools = tool_history[-3:]
                         decision_messages.append(
                             {
                                 "role": "user",
                                 "content": (
                                     "TOOLS ALREADY USED:\n"
                                     + json.dumps(
-                                        tool_history,
+                                        recent_tools,
                                         indent=2,
                                     )
                                 ),
@@ -937,16 +1147,24 @@ async def run_agent(
                         )
                     )
 
-                    result = await _call_mcp_tool(
-                        session=session,
-                        tool_name=tool_name,
-                        arguments=arguments,
+                    result = _trim_tool_result(
+                        result,
+                        max_chars=5000,
                     )
+
                     if len(result) > 12000:
                         result = (
-                        result[:12000]
-                        + "\n\n[Tool result truncated for the local LLM.]"
-                                    )
+                            result[:12000]
+                            + "\n\n[Tool result truncated for the local LLM.]"
+                        )
+
+                    tool_results.append(
+                        {
+                            "tool": tool_name,
+                            "result": result,
+                        }
+                    )
+
                     print(
                         "[Agent] Result received."
                     )
@@ -972,8 +1190,8 @@ async def run_agent(
                                     "MCP TOOL RESULT\n\n"
                                     f"Tool: {tool_name}\n\n"
                                     f"{result}\n\n"
-                                    "Use this result to decide "
-                                    "your next action."
+                                    "Use this result as factual context. "
+                                    "Do not repeat unnecessary details."
                                 ),
                             },
                         ]
