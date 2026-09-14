@@ -152,9 +152,7 @@ def run_agent_process(
 
     return extract_final_answer(stdout)
 
-def extract_final_answer(
-    output: str,
-) -> str:
+def extract_final_answer(output: str,) -> str:
     """
     Extract the final roadmap from the agent CLI output.
 
@@ -229,9 +227,7 @@ def user_request_placeholder() -> str:
     return ""
 
 
-def generate_answer(
-    user_request: str,
-) -> str:
+def generate_answer(user_request: str,) -> str:
     """Generate the roadmap using the existing agent."""
     return run_agent_process(
         user_request
