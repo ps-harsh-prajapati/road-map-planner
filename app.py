@@ -10,7 +10,7 @@ PROJECT_ROOT = os.path.dirname(
     os.path.abspath(__file__)
 )
 
-AGENT_TIMEOUT = 600
+AGENT_TIMEOUT = 1200
 
 
 st.set_page_config(
