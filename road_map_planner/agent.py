@@ -23,7 +23,7 @@ OLLAMA_URL = os.getenv(
 
 OLLAMA_MODEL = os.getenv(
     "OLLAMA_MODEL",
-    "qwen2.5:7b",
+    "qwen2.5:1.5b",
 )
 
 MAX_AGENT_TURNS = 6
