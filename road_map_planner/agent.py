@@ -3,7 +3,7 @@ import json
 import os
 import sys
 import traceback
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from mcp import ClientSession, StdioServerParameters
@@ -33,9 +33,7 @@ MAX_AGENT_TURNS = 6
 # Utility helpers
 # ============================================================
 
-def _format_exception(
-    exc: BaseException,
-) -> str:
+def _format_exception(exc: BaseException) -> str:
     """
     Convert normal exceptions and ExceptionGroup errors
     into readable text.
@@ -62,9 +60,7 @@ def _format_exception(
     return f"{type(exc).__name__}: {exc}"
 
 
-def _tool_schema(
-    tool: Any,
-) -> dict[str, Any]:
+def _tool_schema(tool: Any) -> dict[str, Any]:
     """Convert an MCP tool to a compact LLM schema."""
 
     return {
@@ -112,12 +108,13 @@ async def _get_mcp_tools(
 def _build_system_message(
     tools: list[dict[str, Any]],
 ) -> str:
-    """Build a compact system prompt for the Road Map Planner agent."""
+    """Build the system prompt for the Road Map Planner agent."""
 
     tool_lines: list[str] = []
 
     for tool in tools:
         name = tool["name"]
+
         description = tool.get(
             "description",
             "",
@@ -158,9 +155,7 @@ AVAILABLE MCP TOOLS
 YOUR JOB
 ==================================================
 
-Understand the user's request, decide which MCP tools are useful,
-call those tools when necessary, inspect their results, and continue
-until you have enough information to produce a useful final roadmap.
+Understand the user's request and decide which MCP tools are useful.
 
 You decide:
 - which tool to call
@@ -168,7 +163,7 @@ You decide:
 - whether another tool is needed
 - when to stop
 
-Do NOT blindly call every tool.
+Do NOT blindly call every available tool.
 
 ==================================================
 VERY IMPORTANT JSON FORMAT
@@ -181,70 +176,92 @@ There are ONLY TWO valid values for "action":
 1. "tool"
 2. "final"
 
-NEVER put a tool name directly inside "action".
+NEVER put an MCP tool name directly inside "action".
 
 ==================================================
-CORRECT TOOL CALL
+TOOL CALL FORMAT
 ==================================================
+
+For every MCP tool call, return EXACTLY this structure:
+
+{{
+  "action": "tool",
+  "tool_name": "EXACT_TOOL_NAME",
+  "arguments": {{}}
+}}
 
 Example:
 
 {{
   "action": "tool",
-  "tool_name": "roadmap_structure",
+  "tool_name": "project_recommendations",
   "arguments": {{
-    "goal": "Become a professional AI engineer",
-    "roadmap_type": "career",
-    "experience_level": "beginner",
-    "target_months": 6,
-    "hours_per_day": 2
+    "topic": "machine learning",
+    "experience_level": "beginner"
   }}
 }}
 
-Notice:
+IMPORTANT:
 
-"action" = "tool"
-
-"tool_name" = the actual MCP tool name
+- "action" MUST be exactly "tool"
+- "tool_name" MUST contain the MCP tool name
+- "arguments" MUST be a JSON object
+- Use only tool names from AVAILABLE MCP TOOLS
 
 ==================================================
-CORRECT FINAL RESPONSE
+FINAL DECISION FORMAT
 ==================================================
+
+When enough information has been collected, return EXACTLY:
 
 {{
-  "action": "final",
-  "answer": "Complete roadmap..."
+  "action": "final"
 }}
 
+The final decision must contain nothing else.
+
+DO NOT include:
+- answer
+- roadmap
+- goal
+- resources
+- learning_phases
+- projects
+- timeline
+- explanations
+- markdown
+
 ==================================================
-INCORRECT RESPONSES
+INCORRECT FORMAT
 ==================================================
 
-DO NOT generate:
+These are WRONG:
 
 {{
-  "action": "roadmap_structure"
+  "action": "project_recommendations"
 }}
-
-DO NOT generate:
 
 {{
   "action": "technology_research"
 }}
 
-DO NOT generate:
-
 {{
-  "action": "book_recommendations"
+  "action": "roadmap_structure"
 }}
 
-The tool name ALWAYS belongs inside:
+These are also WRONG:
 
-"tool_name"
+{{
+  "action": "final",
+  "answer": "..."
+}}
 
-and "action" MUST be:
-
-"tool"
+{{
+  "action": "final",
+  "roadmap": {{
+    ...
+  }}
+}}
 
 ==================================================
 TOOL SELECTION
@@ -263,7 +280,7 @@ Use project_recommendations when practical projects would help.
 Use preparation_timeline when the user provides or needs a study
 duration and schedule.
 
-Use only the tools that are relevant.
+Use only the tools relevant to the request.
 
 ==================================================
 AFTER A TOOL RESULT
@@ -275,26 +292,11 @@ After receiving a tool result:
 2. Use it as context.
 3. Decide whether another tool is needed.
 4. Do not repeat the same tool unnecessarily.
-5. When enough information has been collected, return "final".
+5. If enough information is available, return:
 
-==================================================
-FULL ROADMAP REQUIREMENTS
-==================================================
-
-For a complete career or education roadmap, the final answer should
-normally contain:
-
-1. Goal
-2. Starting Point / Assumptions
-3. Skill Gaps
-4. Roadmap Phases
-5. Current Technologies
-6. Books / Resources
-7. Real-World Projects
-8. Preparation Timeline
-9. Expected Outcome
-
-Do not return a one-line answer for a full roadmap.
+{{
+  "action": "final"
+}}
 
 ==================================================
 FINAL RULE
@@ -302,7 +304,7 @@ FINAL RULE
 
 Return ONLY valid JSON.
 
-For tool calls:
+For a tool call:
 
 {{
   "action": "tool",
@@ -310,13 +312,13 @@ For tool calls:
   "arguments": {{}}
 }}
 
-For the final answer:
+For completion:
 
 {{
-  "action": "final",
-  "answer": "ready"
+  "action": "final"
 }}
 """
+
 
 # ============================================================
 # Ollama
@@ -329,24 +331,22 @@ async def _call_ollama(
     """Ask Ollama for the next agent action."""
 
     payload = {
-    "model": OLLAMA_MODEL,
-    "keep_alive": "10m",
-    "messages": [
-        {
-            "role": "system",
-            "content": _build_system_message(
-                tools
-            ),
+        "model": OLLAMA_MODEL,
+        "keep_alive": "10m",
+        "messages": [
+            {
+                "role": "system",
+                "content": _build_system_message(tools),
+            },
+            *messages,
+        ],
+        "stream": False,
+        "format": "json",
+        "options": {
+            "temperature": 0,
+            "num_predict": 128,
         },
-        *messages,
-    ],
-    "stream": False,
-    "format": "json",
-    "options": {
-        "temperature": 0,
-        "num_predict": 4096,
-    },
-}
+    }
 
     try:
         async with httpx.AsyncClient(
@@ -376,8 +376,7 @@ async def _call_ollama(
         raise RuntimeError(
             "Ollama took too long to produce a response.\n"
             f"Model: {OLLAMA_MODEL}\n"
-            "The local 8B model is running on CPU, so "
-            "generation can take several minutes."
+            "The local model may be slow on CPU."
         ) from exc
 
     except httpx.HTTPStatusError as exc:
@@ -396,9 +395,7 @@ async def _call_ollama(
         if detail:
             message += f"\nResponse: {detail}"
 
-        raise RuntimeError(
-            message
-        ) from exc
+        raise RuntimeError(message) from exc
 
     except httpx.RequestError as exc:
         raise RuntimeError(
@@ -406,7 +403,12 @@ async def _call_ollama(
             f"{type(exc).__name__}: {exc}"
         ) from exc
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "Ollama returned an invalid HTTP JSON response."
+        ) from exc
 
     content = (
         data
@@ -419,11 +421,26 @@ async def _call_ollama(
             "Ollama returned no message content."
         )
 
+    content = str(content).strip()
+
     try:
-        decision = json.loads(
-            content
-        )
+        decision = json.loads(content)
+
     except json.JSONDecodeError as exc:
+        normalized_content = content.lower()
+
+        if (
+            '"action"' in normalized_content
+            and '"final"' in normalized_content
+        ):
+            print(
+                "[Agent] Recovered truncated final decision."
+            )
+
+            return {
+                "action": "final"
+            }
+
         raise RuntimeError(
             "The model returned invalid JSON.\n\n"
             f"Raw response:\n{content}"
@@ -438,6 +455,152 @@ async def _call_ollama(
         )
 
     return decision
+
+
+# ============================================================
+# Decision normalization
+# ============================================================
+
+def _normalize_decision(
+    decision: Any,
+    available_tool_names: Optional[set[str]] = None,
+) -> dict[str, Any]:
+    """
+    Normalize different local-model decision formats into
+    one canonical schema used by run_agent().
+
+    Canonical tool format:
+
+    {
+        "action": "tool",
+        "tool_name": "project_recommendations",
+        "arguments": {}
+    }
+
+    Canonical final format:
+
+    {
+        "action": "final"
+    }
+    """
+
+    if not isinstance(decision, dict):
+        raise RuntimeError(
+            f"Model decision must be a JSON object, "
+            f"got {type(decision).__name__}."
+        )
+
+    action = str(
+        decision.get("action", "")
+    ).strip().lower()
+
+    # ============================================================
+    # FINAL
+    # ============================================================
+
+    if action == "final":
+        return {
+            "action": "final"
+        }
+
+    # ============================================================
+    # STANDARD TOOL CALL
+    # ============================================================
+
+    if action in {
+        "tool",
+        "tool_call",
+        "call_tool",
+    }:
+
+        tool_name = (
+            decision.get("tool_name")
+            or decision.get("tool")
+            or decision.get("name")
+        )
+
+        if not tool_name:
+            raise RuntimeError(
+                "Model requested a tool call "
+                "but did not provide a tool name."
+            )
+
+        tool_name = str(tool_name).strip()
+
+        if (
+            available_tool_names is not None
+            and tool_name not in available_tool_names
+        ):
+            raise RuntimeError(
+                f"Model requested unknown MCP tool: "
+                f"{tool_name}. "
+                f"Available tools: "
+                f"{sorted(available_tool_names)}"
+            )
+
+        arguments = (
+            decision.get("arguments")
+            or decision.get("args")
+            or decision.get("parameters")
+            or {}
+        )
+
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        return {
+            "action": "tool",
+            "tool_name": tool_name,
+            "arguments": arguments,
+        }
+
+    # ============================================================
+    # LOCAL MODEL FALLBACK
+    # ============================================================
+    #
+    # Some local models return:
+    #
+    # {
+    #     "action": "project_recommendations"
+    # }
+    #
+    # If action matches a real MCP tool, convert it safely.
+    #
+
+    if (
+        available_tool_names is not None
+        and action in available_tool_names
+    ):
+
+        arguments = (
+            decision.get("arguments")
+            or decision.get("args")
+            or decision.get("parameters")
+            or {}
+        )
+
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        print(
+            f"[Agent] Normalized direct tool action "
+            f"'{action}' -> tool call."
+        )
+
+        return {
+            "action": "tool",
+            "tool_name": action,
+            "arguments": arguments,
+        }
+
+    # ============================================================
+    # INVALID
+    # ============================================================
+
+    raise RuntimeError(
+        f"Invalid agent action: {action!r}. "
+        "Expected 'tool', 'final', or a valid MCP tool name."
+    )
 
 
 # ============================================================
@@ -485,16 +648,35 @@ async def _call_mcp_tool(
             "a result without content."
         )
 
-    if (
-        getattr(
-            result,
-            "isError",
-            False,
-        )
+    if getattr(
+        result,
+        "isError",
+        False,
     ):
+        parts: list[str] = []
+
+        for content in content_items:
+            text = getattr(
+                content,
+                "text",
+                None,
+            )
+
+            if text:
+                parts.append(
+                    str(text)
+                )
+
+        error_detail = "\n".join(parts)
+
+        if error_detail:
+            return (
+                f"MCP tool '{tool_name}' "
+                f"reported an error:\n{error_detail}"
+            )
+
         return (
-            f"MCP tool '{tool_name}' "
-            "reported an error."
+            f"MCP tool '{tool_name}' reported an error."
         )
 
     parts: list[str] = []
@@ -537,216 +719,9 @@ async def _call_mcp_tool(
 
 
 # ============================================================
-# Roadmap validation
+# Tool-result trimming
 # ============================================================
 
-def _is_complete_roadmap(
-    answer: str,
-) -> bool:
-    """
-    Check whether the model produced a substantial roadmap.
-
-    The check is intentionally flexible because a local LLM may use
-    different headings such as "Tech Stack" instead of
-    "Current Technologies".
-    """
-
-    answer = answer.strip()
-
-    # A very short response is definitely not a roadmap.
-    if len(answer) < 700:
-        return False
-
-    answer_lower = answer.lower()
-
-    section_groups = [
-        # Goal
-        (
-            "goal",
-            "objective",
-            "target",
-        ),
-
-        # Starting point
-        (
-            "starting point",
-            "current level",
-            "assumptions",
-            "background",
-        ),
-
-        # Skills
-        (
-            "skill gap",
-            "skills to learn",
-            "skills",
-            "prerequisites",
-        ),
-
-        # Roadmap
-        (
-            "roadmap",
-            "phases",
-            "learning path",
-            "learning stages",
-        ),
-
-        # Technology
-        (
-            "current technolog",
-            "technologies",
-            "tech stack",
-            "tools and technologies",
-        ),
-
-        # Resources
-        (
-            "books",
-            "resources",
-            "learning resources",
-        ),
-
-        # Projects
-        (
-            "projects",
-            "real-world projects",
-            "portfolio",
-        ),
-
-        # Timeline
-        (
-            "timeline",
-            "schedule",
-            "month 1",
-            "week 1",
-        ),
-
-        # Outcome
-        (
-            "expected outcome",
-            "outcome",
-            "result",
-            "career readiness",
-        ),
-    ]
-
-    matches = 0
-
-    for group in section_groups:
-        if any(
-            keyword in answer_lower
-            for keyword in group
-        ):
-            matches += 1
-
-    # Require most major sections, not every exact heading.
-    return matches >= 7
-
-def _normalize_decision(
-    decision: dict[str, Any],
-    available_tools: set[str],
-) -> dict[str, Any]:
-    """
-    Normalize tool decisions produced by the local LLM.
-
-    The model should return:
-
-    {
-        "action": "tool",
-        "tool_name": "preparation_timeline",
-        "arguments": {...}
-    }
-
-    But smaller local models sometimes return:
-
-    {
-        "action": "preparation_timeline",
-        "arguments": {...}
-    }
-
-    or use a synonymous action name such as:
-
-    {
-        "action": "start_study_plan",
-        "arguments": {...}
-    }
-    """
-
-    action = decision.get("action")
-
-    # ---------------------------------------------------------
-    # Correct tool format
-    # ---------------------------------------------------------
-
-    if action == "tool":
-        return decision
-
-    # ---------------------------------------------------------
-    # Direct MCP tool name in action
-    # ---------------------------------------------------------
-
-    if (
-        isinstance(action, str)
-        and action in available_tools
-    ):
-        return {
-            "action": "tool",
-            "tool_name": action,
-            "arguments": decision.get(
-                "arguments",
-                {},
-            ),
-        }
-
-    # ---------------------------------------------------------
-    # Common aliases produced by smaller local models
-    # ---------------------------------------------------------
-
-    aliases = {
-        "start_study_plan": "preparation_timeline",
-        "study_plan": "preparation_timeline",
-        "create_study_plan": "preparation_timeline",
-        "build_study_plan": "preparation_timeline",
-
-        "research_technology": "technology_research",
-        "current_technology": "technology_research",
-        "technology_search": "technology_research",
-
-        "find_books": "book_recommendations",
-        "book_search": "book_recommendations",
-        "recommend_books": "book_recommendations",
-
-        "find_projects": "project_recommendations",
-        "recommend_projects": "project_recommendations",
-        "project_search": "project_recommendations",
-
-        "build_roadmap": "roadmap_structure",
-        "create_roadmap": "roadmap_structure",
-        "plan_roadmap": "roadmap_structure",
-    }
-
-    if (
-        isinstance(action, str)
-        and action in aliases
-    ):
-        normalized_tool = aliases[action]
-
-        if normalized_tool in available_tools:
-            return {
-                "action": "tool",
-                "tool_name": normalized_tool,
-                "arguments": decision.get(
-                    "arguments",
-                    {},
-                ),
-            }
-
-    # ---------------------------------------------------------
-    # Leave unknown actions unchanged so the caller can
-    # report a useful error.
-    # ---------------------------------------------------------
-
-    return decision
 def _trim_tool_result(
     result: str,
     max_chars: int = 5000,
@@ -766,15 +741,19 @@ def _trim_tool_result(
         + "\n\n[Tool result truncated for the local LLM.]"
     )
 
+
+# ============================================================
+# Final roadmap generation
+# ============================================================
+
 async def _generate_final_answer(
     user_request: str,
     tool_results: list[dict[str, str]],
 ) -> str:
     """
-    Generate the final roadmap using a compact context.
+    Generate the actual human-readable roadmap.
 
-    This avoids sending the full agent history and MCP schemas
-    to the local 7B model for the final response.
+    This is separate from the agent decision call.
     """
 
     sections: list[str] = []
@@ -793,6 +772,12 @@ RESULT:
         sections
     )
 
+    if not combined_results:
+        combined_results = (
+            "No MCP tool results were collected. "
+            "Use the user's request and clearly stated assumptions."
+        )
+
     prompt = f"""
 You are the final answer writer for Road Map Planner.
 
@@ -804,7 +789,7 @@ You have already collected information from MCP tools.
 TOOL RESULTS:
 {combined_results}
 
-Create the final roadmap.
+Create the final roadmap for the user.
 
 The roadmap should include:
 
@@ -818,15 +803,27 @@ The roadmap should include:
 8. Preparation Timeline
 9. Expected Outcome
 
-Important:
+IMPORTANT:
 
-- Use the tool results as factual context.
-- Do not invent information that contradicts the tool results.
+- Return ONLY human-readable Markdown.
+- Do NOT return JSON.
+- Do NOT return Python code.
+- Do NOT mention MCP.
+- Do NOT mention internal tools.
+- Do NOT mention agent reasoning.
+- Use the user's requested goal as the main focus.
+- Use tool results as factual context.
+- Do not contradict information found in the tool results.
 - Make the plan practical and actionable.
 - Respect the user's available time.
-- Do not mention MCP, internal tools, or agent reasoning.
-- Do not output JSON.
-- Return only the final human-readable roadmap.
+- If the user did not specify a duration, choose a reasonable progression.
+- Keep explanations concise.
+- Use clear headings and bullet points.
+- Include concrete projects.
+- Include a realistic timeline.
+- Do not put the roadmap inside a JSON object.
+
+Now write the complete roadmap.
 """
 
     payload = {
@@ -837,7 +834,8 @@ Important:
                 "role": "system",
                 "content": (
                     "You are a professional roadmap writer. "
-                    "Write a concise but complete roadmap."
+                    "Write a concise but complete roadmap in Markdown. "
+                    "Never output JSON."
                 ),
             },
             {
@@ -848,7 +846,7 @@ Important:
         "stream": False,
         "options": {
             "temperature": 0.2,
-            "num_predict": 3000,
+            "num_predict": 1200,
         },
     }
 
@@ -869,18 +867,48 @@ Important:
 
             response.raise_for_status()
 
+    except httpx.ConnectError as exc:
+        raise RuntimeError(
+            "Could not connect to Ollama while generating "
+            "the final roadmap."
+        ) from exc
+
     except httpx.ReadTimeout as exc:
         raise RuntimeError(
             "The final roadmap generation timed out. "
-            "The local model is running on CPU."
+            f"The local model ({OLLAMA_MODEL}) may be slow on CPU."
         ) from exc
+
+    except httpx.HTTPStatusError as exc:
+        detail = ""
+
+        try:
+            detail = exc.response.text.strip()
+        except Exception:
+            pass
+
+        message = (
+            "Ollama failed while generating the final roadmap. "
+            f"HTTP {exc.response.status_code}."
+        )
+
+        if detail:
+            message += f"\nResponse: {detail}"
+
+        raise RuntimeError(message) from exc
 
     except httpx.RequestError as exc:
         raise RuntimeError(
             f"Final roadmap generation failed: {exc}"
         ) from exc
 
-    data = response.json()
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "Ollama returned an invalid response while "
+            "generating the final roadmap."
+        ) from exc
 
     answer = (
         data
@@ -893,71 +921,47 @@ Important:
             "Ollama returned an empty final roadmap."
         )
 
-    return answer.strip()
-def _validate_roadmap_request(user_request: str) -> tuple[bool, str]:
-    """Reject empty, traceback/error, and clearly unrelated input before MCP/LLM."""
-    text = user_request.strip()
+    answer = str(answer).strip()
 
-    if not text:
-        return False, "Please enter a roadmap request."
-
-    lowered = text.lower()
-
-    # Do not send pasted application errors/tracebacks into the planner.
-    error_markers = (
-        "traceback (most recent call last)",
-        "httpx.readtimeout",
-        "runtimeerror:",
-        "exception:",
-        "filenotfounderror:",
-        "valueerror:",
-        "typeerror:",
-        "keyerror:",
-        "attributeerror:",
-        "modulenotfounderror:",
-        "connectionerror:",
-        "stack trace",
-    )
-
-    if any(marker in lowered for marker in error_markers):
-        return (
-            False,
-            "It looks like you pasted an error or traceback. "
-            "Please enter a roadmap request instead.\n\n"
-            "Example: I want to become an AI engineer in 6 months."
+    if not answer:
+        raise RuntimeError(
+            "Ollama returned an empty final roadmap."
         )
 
-    # A lightweight intent check prevents arbitrary text from reaching MCP.
-    roadmap_terms = (
-        "roadmap", "learn", "learning", "become", "career", "career path",
-        "skill", "skills", "study", "prepare", "preparation", "education",
-        "developer", "engineer", "programmer", "job", "technology",
-        "technologies", "project", "projects", "course", "interview",
-        "machine learning", "artificial intelligence", "ai engineer",
-        "data scientist", "software engineer", "web developer", "backend",
-        "frontend", "devops", "cloud", "cybersecurity",
-    )
+    return answer
 
-    if not any(term in lowered for term in roadmap_terms):
-        return (
-            False,
-            "I can help you create a career, education, or skill roadmap. "
-            "Please describe what you want to learn or become.\n\n"
-            "Example: I want to become an AI engineer in 6 months."
-        )
 
-    return True, ""
-
+# ============================================================
+# Main agent
+# ============================================================
 
 async def run_agent(
     user_request: str,
 ) -> str:
-    """Run the Road Map Planner agent with input validation and MCP tools."""
+    """
+    Run the autonomous Road Map Planner agent.
 
-    # Validate BEFORE starting MCP or calling Ollama.
-    is_valid, validation_message = _validate_roadmap_request(user_request)
-    if not is_valid:
-        return validation_message
+    User
+      ↓
+    LLM decision
+      ↓
+    MCP tool
+      ↓
+    Tool result
+      ↓
+    LLM decision
+      ↓
+    Another tool OR final
+      ↓
+    Final-answer writer
+      ↓
+    Human-readable roadmap
+    """
+
+    if not user_request.strip():
+        raise ValueError(
+            "User request cannot be empty."
+        )
 
     server_params = StdioServerParameters(
         command=sys.executable,
@@ -973,38 +977,87 @@ async def run_agent(
     )
 
     try:
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
+        async with stdio_client(
+            server_params,
+        ) as (
+            read,
+            write,
+        ):
+
+            async with ClientSession(
+                read,
+                write,
+            ) as session:
+
                 await session.initialize()
 
-                tools = await _get_mcp_tools(session)
-                tool_names = {tool["name"] for tool in tools}
-
-                print("[Agent] MCP connected.")
-                print(
-                    "[Agent] Available tools: "
-                    + ", ".join(sorted(tool_names))
+                tools = await _get_mcp_tools(
+                    session
                 )
 
-                messages: list[dict[str, Any]] = [
-                    {"role": "user", "content": user_request.strip()}
+                tool_names = {
+                    tool["name"]
+                    for tool in tools
+                }
+
+                print(
+                    "[Agent] MCP connected."
+                )
+
+                print(
+                    "[Agent] Available tools: "
+                    + ", ".join(
+                        sorted(tool_names)
+                    )
+                )
+
+                messages: list[
+                    dict[str, Any]
+                ] = [
+                    {
+                        "role": "user",
+                        "content": user_request,
+                    }
                 ]
 
-                tool_history: list[dict[str, Any]] = []
-                tool_results: list[dict[str, str]] = []
+                tool_history: list[
+                    dict[str, Any]
+                ] = []
 
-                for turn in range(1, MAX_AGENT_TURNS + 1):
-                    print(f"[Agent] Step {turn}/{MAX_AGENT_TURNS}")
+                tool_results: list[
+                    dict[str, str]
+                ] = []
 
-                    decision_messages = list(messages)
+                for turn in range(
+                    1,
+                    MAX_AGENT_TURNS + 1,
+                ):
+
+                    print(
+                        f"[Agent] Step "
+                        f"{turn}/{MAX_AGENT_TURNS}"
+                    )
+
+                    decision_messages = list(
+                        messages
+                    )
 
                     if tool_history:
+                        recent_tools = tool_history[-3:]
+
                         decision_messages.append(
                             {
                                 "role": "user",
                                 "content": (
                                     "TOOLS ALREADY USED:\n"
-                                    + json.dumps(tool_history[-3:], indent=2)
+                                    + json.dumps(
+                                        recent_tools,
+                                        indent=2,
+                                    )
+                                    + "\n\n"
+                                    "Choose another relevant tool "
+                                    "only if needed. Otherwise return "
+                                    'exactly {"action":"final"}.'
                                 ),
                             }
                         )
@@ -1013,59 +1066,112 @@ async def run_agent(
                         messages=decision_messages,
                         tools=tools,
                     )
-                    decision = _normalize_decision(decision, tool_names)
-                    action = decision.get("action")
 
-                    # ------------------------------------------------------
+                    decision = _normalize_decision(
+                        decision,
+                        tool_names,
+                    )
+
+                    action = decision.get(
+                        "action"
+                    )
+
+                    # ==================================================
                     # FINAL
-                    # ------------------------------------------------------
-                    if action == "final":
-                        print("[Agent] Generating final roadmap...")
+                    # ==================================================
 
-                        answer = await _generate_final_answer(
-                            user_request=user_request.strip(),
-                            tool_results=tool_results,
+                    if action == "final":
+
+                        print(
+                            "[Agent] Decision: final"
                         )
 
-                        if not answer or not answer.strip():
-                            raise RuntimeError(
-                                "Failed to generate final roadmap."
+                        print(
+                            "[Agent] Generating final roadmap..."
+                        )
+
+                        try:
+                            answer = await _generate_final_answer(
+                                user_request=user_request,
+                                tool_results=tool_results,
                             )
 
-                        print("[Agent] Finished.")
-                        return answer.strip()
+                        except Exception as exc:
+                            raise RuntimeError(
+                                "Failed to generate the final roadmap.\n"
+                                f"{_format_exception(exc)}"
+                            ) from exc
 
-                    # ------------------------------------------------------
+                        answer = answer.strip()
+
+                        if not answer:
+                            raise RuntimeError(
+                                "Final roadmap generation returned "
+                                "an empty answer."
+                            )
+
+                        print(
+                            "[Agent] Finished."
+                        )
+
+                        return answer
+
+                    # ==================================================
                     # TOOL
-                    # ------------------------------------------------------
+                    # ==================================================
+
                     if action != "tool":
                         raise RuntimeError(
-                            f"Invalid agent action: {action}"
+                            "Invalid normalized agent action: "
+                            f"{action}"
                         )
 
-                    tool_name = decision.get("tool_name")
-                    arguments = decision.get("arguments", {})
+                    # IMPORTANT:
+                    # This now matches _normalize_decision().
+                    tool_name = decision.get(
+                        "tool_name"
+                    )
 
-                    if not isinstance(tool_name, str) or not tool_name:
+                    arguments = decision.get(
+                        "arguments",
+                        {},
+                    )
+
+                    if not isinstance(
+                        tool_name,
+                        str,
+                    ):
                         raise RuntimeError(
-                            "Agent did not provide a valid tool name."
+                            "Agent did not provide "
+                            "a valid tool name."
                         )
 
-                    if not isinstance(arguments, dict):
+                    if not isinstance(
+                        arguments,
+                        dict,
+                    ):
                         raise RuntimeError(
-                            "Tool arguments must be a JSON object."
+                            "Tool arguments must be "
+                            "a JSON object."
                         )
 
                     if tool_name not in tool_names:
                         raise RuntimeError(
-                            "Agent selected unavailable MCP tool: "
-                            f"{tool_name}"
+                            "Agent selected unavailable "
+                            f"MCP tool: {tool_name}"
                         )
 
-                    print(f"[Agent] Calling: {tool_name}")
+                    print(
+                        f"[Agent] Calling: "
+                        f"{tool_name}"
+                    )
+
                     print(
                         "[Agent] Arguments: "
-                        + json.dumps(arguments, ensure_ascii=False)
+                        + json.dumps(
+                            arguments,
+                            ensure_ascii=False,
+                        )
                     )
 
                     result = await _call_mcp_tool(
@@ -1073,19 +1179,22 @@ async def run_agent(
                         tool_name,
                         arguments,
                     )
-                    result = _trim_tool_result(result, max_chars=5000)
 
-                    if len(result) > 12000:
-                        result = (
-                            result[:12000]
-                            + "\n\n[Tool result truncated for the local LLM.]"
-                        )
-
-                    tool_results.append(
-                        {"tool": tool_name, "result": result}
+                    result = _trim_tool_result(
+                        result,
+                        max_chars=5000,
                     )
 
-                    print("[Agent] Result received.")
+                    tool_results.append(
+                        {
+                            "tool": tool_name,
+                            "result": result,
+                        }
+                    )
+
+                    print(
+                        "[Agent] Result received."
+                    )
 
                     tool_history.append(
                         {
@@ -1098,7 +1207,10 @@ async def run_agent(
                         [
                             {
                                 "role": "assistant",
-                                "content": json.dumps(decision),
+                                "content": json.dumps(
+                                    decision,
+                                    ensure_ascii=False,
+                                ),
                             },
                             {
                                 "role": "user",
@@ -1107,21 +1219,48 @@ async def run_agent(
                                     f"Tool: {tool_name}\n\n"
                                     f"{result}\n\n"
                                     "Use this result as factual context. "
-                                    "Do not repeat unnecessary details."
+                                    "Do not repeat unnecessary details. "
+                                    "Decide whether another relevant tool "
+                                    "is needed. "
+                                    "If enough information is now available, "
+                                    'return exactly {"action":"final"}.'
                                 ),
                             },
                         ]
                     )
 
-                raise RuntimeError(
-                    "Agent reached its maximum "
-                    f"of {MAX_AGENT_TURNS} steps without producing "
-                    "a complete roadmap."
+                # ======================================================
+                # MAXIMUM TURNS REACHED
+                # ======================================================
+
+                print(
+                    "[Agent] Maximum tool steps reached. "
+                    "Generating final roadmap from collected results..."
                 )
+
+                answer = await _generate_final_answer(
+                    user_request=user_request,
+                    tool_results=tool_results,
+                )
+
+                answer = answer.strip()
+
+                if not answer:
+                    raise RuntimeError(
+                        "Final roadmap generation returned "
+                        "an empty answer."
+                    )
+
+                print(
+                    "[Agent] Finished."
+                )
+
+                return answer
 
     except BaseExceptionGroup as exc:
         raise RuntimeError(
-            "MCP/agent operation failed:\n\n" + _format_exception(exc)
+            "MCP/agent operation failed:\n\n"
+            + _format_exception(exc)
         ) from exc
 
 

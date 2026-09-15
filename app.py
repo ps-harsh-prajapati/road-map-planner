@@ -1,8 +1,9 @@
 import os
+import re
 import subprocess
 import sys
 
-from click import command
+import pandas as pd
 import streamlit as st
 
 
@@ -11,7 +12,6 @@ PROJECT_ROOT = os.path.dirname(
 )
 
 AGENT_TIMEOUT = 1200
-
 
 st.set_page_config(
     page_title="Road Map Planner",
@@ -24,7 +24,6 @@ def initialize_state() -> None:
     """Initialize Streamlit session state."""
     if "messages" not in st.session_state:
         st.session_state.messages = []
-
 
 def render_header() -> None:
     """Render the application header."""
@@ -221,6 +220,62 @@ def extract_final_answer(output: str,) -> str:
 
     return output
 
+def extract_roadmap_chart_data(answer: str) -> pd.DataFrame:
+    """
+    Extract monthly roadmap information from the generated roadmap.
+
+    Looks for sections such as:
+        Month 1
+        Month 2
+        Month 3
+
+    and counts bullet-point items under each month.
+    """
+
+    lines = answer.splitlines()
+
+    months = []
+    current_month = None
+    current_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Detect Month 1, Month 2, etc.
+        match = re.match(
+            r"^(?:#+\s*)?(?:Month|MONTH)\s+(\d+)",
+            stripped,
+        )
+
+        if match:
+            # Save previous month
+            if current_month is not None:
+                months.append(
+                    {
+                        "Month": current_month,
+                        "Learning Items": current_count,
+                    }
+                )
+
+            current_month = f"Month {match.group(1)}"
+            current_count = 0
+            continue
+
+        # Count bullet points
+        if current_month is not None:
+            if stripped.startswith(("-", "*", "•")):
+                current_count += 1
+
+    # Save final month
+    if current_month is not None:
+        months.append(
+            {
+                "Month": current_month,
+                "Learning Items": current_count,
+            }
+        )
+
+    return pd.DataFrame(months)
 
 def user_request_placeholder() -> str:
     """Return an empty placeholder used by the output cleaner."""
@@ -232,7 +287,6 @@ def generate_answer(user_request: str,) -> str:
     return run_agent_process(
         user_request
     )
-
 
 def main() -> None:
     """Run the Streamlit frontend."""
@@ -271,6 +325,17 @@ def main() -> None:
                 )
 
                 st.markdown(answer)
+                chart_data = extract_roadmap_chart_data(answer)
+
+                if not chart_data.empty:
+
+                    st.subheader("📊 Roadmap Timeline")
+
+                    st.bar_chart(
+                     chart_data,
+                        x="Month",
+                        y="Learning Items",
+                            )
 
                 st.session_state.messages.append(
                     {

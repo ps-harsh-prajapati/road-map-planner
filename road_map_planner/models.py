@@ -1,6 +1,5 @@
 from pydantic import BaseModel, Field
 
-
 class UserProfile(BaseModel):
     goal: str
     roadmap_type: str = Field(
