@@ -87,7 +87,7 @@ def build_roadmap_structure(
             "Build job-relevant skills, complete portfolio projects, "
             "demonstrate practical ability, and prepare for interviews."
         )
-
+        
     lines = [
         "Roadmap Structure",
         "",
