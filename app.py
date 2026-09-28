@@ -323,7 +323,9 @@ def main() -> None:
                 answer = generate_answer(
                     prompt
                 )
-
+                # Remove Markdown code fences if the local model adds them
+                answer = re.sub(r"^```(?:markdown|md)?\s*", "", answer.strip(), flags=re.IGNORECASE)
+                answer = re.sub(r"\s*```$", "", answer.strip())
                 st.markdown(answer)
                 chart_data = extract_roadmap_chart_data(answer)
 
